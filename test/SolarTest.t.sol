@@ -63,59 +63,100 @@ contract FundNFTTest is Test, IERC1155Receiver, ERC165 {
     function testCreateFund() public {
         uint256 initialFundId = fundNFT.getCurrentFundId();
         uint256 nftSupply = 10;
+        uint256 nftPrice = 0.05 ether;
         string memory fundBaseURI = "https://mybaseuri.com/fund1/{id}.json";
 
         // Owner creates a new fund
-        fundNFT.createFund(nftSupply, fundBaseURI);
+        uint256 newFundId = fundNFT.createFund(
+            nftSupply,
+            fundBaseURI,
+            nftPrice
+        );
+
+        assertEq(newFundId, initialFundId + 1);
 
         // Verify that the fund has been created with correct values
         (
             uint256 tokenId,
             uint256 totalSupply,
             uint256 availableSupply,
-            string memory baseURI
-        ) = fundNFT.getFundDetails(initialFundId + 1);
+            string memory baseURI,
+            uint256 price
+        ) = fundNFT.getFundDetails(newFundId);
         assertEq(tokenId, 1); // Token ID should be 1
         assertEq(totalSupply, nftSupply); // Total supply should match the input
         assertEq(availableSupply, nftSupply); // Available supply should also match
+        assertEq(baseURI, fundBaseURI);
+        assertEq(price, nftPrice);
     }
 
     // Test purchasing an NFT
     function testBuyNFT() public {
         // Owner creates a new fund
-        uint256 tokenId = fundNFT.createFund(
-            10,
-            "https://mybaseuri.com/fund1/{id}.json"
+        uint256 fundId = fundNFT.createFund(
+            20, // NFT supply
+            "https://mybaseuri.com/fund1/{id}.json", // FundNFT URI
+            0.05 ether // NFT Price
         );
 
         // Make sure the contract holds the tokens
-        uint256 contractBalance = fundNFT.balanceOf(address(fundNFT), tokenId);
-        assertEq(contractBalance, 10); // Contract should hold 10 tokens
+        uint256 initialContractBalance = fundNFT.balanceOf(
+            address(fundNFT),
+            fundId
+        );
+        console.log("Initial Contract Balance: ", initialContractBalance);
+        assertEq(initialContractBalance, 20); // Contract should hold 20 tokens
 
-        // User1 purchases an NFT by sending 0.1 ETH
+        // User1 purchases an NFT by sending 0.5 ETH
+        uint256 purchaseQuantity = 10;
         vm.prank(user1); // Simulate the transaction coming from user1
-        vm.deal(user1, 1 ether);
-        fundNFT.buyNFT{value: 0.05 ether}(1);
+        vm.deal(user1, 10 ether);
+
+        fundNFT.buyNFT{value: 0.5 ether}(fundId, purchaseQuantity);
 
         // Verify that the user's NFT balance has increased
-        uint256 userBalance = fundNFT.balanceOf(user1, tokenId);
-        assertEq(userBalance, tokenId);
+        uint256 userBalance = fundNFT.balanceOf(user1, fundId);
+        console.log("User NFT Balance after purchase: ", userBalance);
+        assertEq(userBalance, purchaseQuantity);
 
         // Verify that the fund's available supply has decreased
-        (, , uint256 availableSupply, ) = fundNFT.getFundDetails(tokenId);
-        assertEq(availableSupply, 9);
+        (, , uint256 availableSupply, , ) = fundNFT.getFundDetails(fundId);
+        console.log("Available Supply after purchase: ", availableSupply);
+        assertEq(availableSupply, 10); // 20 - 10 = 10
+
+        // Verify that the contract's balance of NFTs has decreased
+        uint256 finalContractBalance = fundNFT.balanceOf(
+            address(fundNFT),
+            fundId
+        );
+        console.log("Final Contract Balance: ", finalContractBalance);
+        assertEq(finalContractBalance, 10);
+
+        // Verify that any excess Ether is refunded
+        uint256 excessEther = user1.balance;
+        console.log("User Balance After Purchase: ", excessEther);
+        assertEq(excessEther, 9.5 ether); // 10 - 0.5 = 9.5
     }
 
     // Test withdraw function
     function testWithdrawFunds() public {
         uint256 nftSupply = 10;
+        uint256 nftPrice = 0.05 ether;
 
         // Owner creates a new fund
-        fundNFT.createFund(nftSupply, "https://mybaseuri.com/fund1/{id}.json");
+        fundNFT.createFund(
+            nftSupply,
+            "https://mybaseuri.com/fund1/{id}.json",
+            nftPrice
+        );
 
-        // User1 purchases an NFT by sending 0.1 ETH
+        // User1 purchases an NFT by sending 0.05 ETH
         vm.prank(user1);
-        fundNFT.buyNFT{value: 0.05 ether}(1);
+        fundNFT.buyNFT{value: 0.05 ether}(1, 1);
+
+        uint256 contractBalanceAfterPurchase = address(fundNFT).balance;
+        assertEq(contractBalanceAfterPurchase, 0.05 ether);
+
         console.log(address(this).balance);
         console.log(user1.balance);
 
@@ -124,43 +165,58 @@ contract FundNFTTest is Test, IERC1155Receiver, ERC165 {
         fundNFT.withdrawFunds();
         uint256 ownerFinalBalance = owner.balance;
 
-        // Verify that the owner's balance has increased by 0.1 ETH
+        // Verify that the owner's balance has increased by 0.05 ETH
         assertEq(ownerFinalBalance - ownerInitialBalance, 0.05 ether);
+
+        uint256 contractBalanceAfterWithdrawal = address(fundNFT).balance;
+        assertEq(contractBalanceAfterWithdrawal, 0);
     }
 
     // Test failure cases
     function testFailBuyNFTWithoutSendingETH() public {
         uint256 nftSupply = 10;
+        uint256 nftPrice = 0.05 ether;
 
         // Owner creates a new fund
-        fundNFT.createFund(nftSupply, "https://mybaseuri.com/fund1/{id}.json");
+        fundNFT.createFund(
+            nftSupply,
+            "https://mybaseuri.com/fund1/{id}.json",
+            nftPrice
+        );
 
-        // User2 tries to buy an NFT without sending 0.1 ETH (should fail)
+        // User2 tries to buy an NFT without sending 0.05 ETH (should fail)
         vm.prank(user2);
-        fundNFT.buyNFT(1); // Should revert since no ETH is sent
+        fundNFT.buyNFT(1, 1); // Should revert since no ETH is sent
     }
 
     function testFailBuyNFTWhenNoSupply() public {
         uint256 nftSupply = 1;
+        uint256 nftPrice = 0.05 ether;
 
         // Owner creates a new fund with only 1 NFT available
-        fundNFT.createFund(nftSupply, "https://mybaseuri.com/fund1/{id}.json");
+        fundNFT.createFund(
+            nftSupply,
+            "https://mybaseuri.com/fund1/{id}.json",
+            nftPrice
+        );
 
         // User1 buys the first NFT
         vm.prank(user1);
-        fundNFT.buyNFT{value: 0.05 ether}(1);
+        fundNFT.buyNFT{value: 0.05 ether}(1, 1);
 
         // User2 tries to buy another NFT from the same fund (should fail as supply is 0)
         vm.prank(user2);
-        fundNFT.buyNFT{value: 0.05 ether}(1); // Should fail
+        fundNFT.buyNFT{value: 0.05 ether}(1, 1); // Should fail
     }
 
-    // // Test constructing metadata URL
+    // Test constructing metadata URL
     // function testConstructMetadataURL() public {
     //     uint256 nftSupply = 10; // For example, create 10 NFTs
+    //     uint256 nftPrice = 0.05 ether;
     //     uint256 fundId = fundNFT.createFund(
     //         nftSupply,
-    //         "https://mybaseuri.com/fund1/{id}.json"
+    //         "https://mybaseuri.com/fund1/{id}.json",
+    //         nftPrice
     //     ); // This will create a fund and mint NFTs
     //     uint256 tokenId = fundNFT.getCurrentTokenId(); // Assuming this is how you get the token ID
 
@@ -186,24 +242,24 @@ contract FundNFTTest is Test, IERC1155Receiver, ERC165 {
 
     // Test getCurrentTokenId
     function testGetCurrentTokenId() public {
-        fundNFT.createFund(10, "https://mybaseuri.com/fund1/{id}.json"); // Creates a fund with 10 NFTs
+        fundNFT.createFund(
+            10,
+            "https://mybaseuri.com/fund1/{id}.json",
+            0.05 ether
+        ); // Creates a fund with 10 NFTs
         uint256 tokenId = fundNFT.getCurrentTokenId();
 
         // Verify that the current token ID matches the expected value
         assertEq(tokenId, 1); // Assuming the first tokenId is 1 when the contract is deployed
     }
 
-    // Test getNFTPrice
-    function testGetNFTPrice() public {
-        uint256 nftPrice = fundNFT.getNFTPrice();
-
-        // Verify that the NFT price matches the expected value
-        assertEq(nftPrice, 0.05 ether); // Assuming the NFT price is set to 0.05 ether in the contract
-    }
-
     // Test getCurrentFundId
     function testGetCurrentFundId() public {
-        fundNFT.createFund(10, "https://mybaseuri.com/fund1/{id}.json"); // Creates a fund with 10 NFTs
+        fundNFT.createFund(
+            10,
+            "https://mybaseuri.com/fund1/{id}.json",
+            0.05 ether
+        ); // Creates a fund with 10 NFTs
         uint256 fundId = fundNFT.getCurrentFundId();
 
         // Verify that the current fund ID matches the expected value
@@ -214,22 +270,26 @@ contract FundNFTTest is Test, IERC1155Receiver, ERC165 {
     function testGetFundDetails() public {
         uint256 nftSupply = 10;
         string memory fundBaseURI = "https://mybaseuri.com/fund1/{id}.json";
+        uint256 nftPrice = 0.05 ether;
 
         // Owner creates a new fund
-        fundNFT.createFund(nftSupply, fundBaseURI);
+        fundNFT.createFund(nftSupply, fundBaseURI, nftPrice);
 
         // Get details of the created fund
         (
             uint256 tokenId,
             uint256 totalSupply,
             uint256 availableSupply,
-            string memory baseURI
+            string memory baseURI,
+            uint256 price
         ) = fundNFT.getFundDetails(1);
 
         // Verify that the fund details are correct
         assertEq(tokenId, 1); // Token ID should be 1
         assertEq(totalSupply, nftSupply); // Total supply should match the input
         assertEq(availableSupply, nftSupply); // Available supply should also match
+        assertEq(baseURI, fundBaseURI); // NFT Uri must match
+        assertEq(price, nftPrice); // Price of the NFT must match
     }
 
     // // Test getMetadataURL
@@ -257,28 +317,6 @@ contract FundNFTTest is Test, IERC1155Receiver, ERC165 {
     //     // Verify that the constructed URL is correct
     //     assertEq(metadataURL, expectedURL);
     // }
-
-    function uint2str(
-        uint256 _i
-    ) internal pure returns (string memory _uintAsString) {
-        if (_i == 0) {
-            return "0";
-        }
-        uint256 j = _i;
-        uint256 length;
-        while (j != 0) {
-            length++;
-            j /= 10;
-        }
-        bytes memory bstr = new bytes(length);
-        uint256 k = length;
-        j = _i;
-        while (j != 0) {
-            bstr[--k] = bytes1(uint8(48 + (j % 10)));
-            j /= 10;
-        }
-        return string(bstr);
-    }
 
     // Test failure cases for invalid fund ID
     function testFailGetFundDetailsForInvalidFundId() public {

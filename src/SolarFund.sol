@@ -4,12 +4,12 @@ pragma solidity ^0.8.19;
 import {ERC1155} from "lib/openzeppelin-contracts/contracts/token/ERC1155/ERC1155.sol";
 import {Strings} from "lib/openzeppelin-contracts/contracts/utils/Strings.sol"; // Import the Strings library
 import {IERC1155Receiver, IERC165} from "lib/openzeppelin-contracts/contracts//token/ERC1155/IERC1155Receiver.sol";
+import {ReentrancyGuard} from "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
+import {console} from "forge-std/Test.sol";
 
-contract FundNFT is ERC1155, IERC1155Receiver {
+contract FundNFT is ERC1155, IERC1155Receiver, ReentrancyGuard {
     uint256 private currentTokenId; // Token ID counter
-    uint256 private constant NFT_PRICE = 0.05 ether; // Price of 1 NFT in ETH
     address private owner; // Owner of the contract
-
     string private baseURI; // The base URI to the metadata folder (Pinata IPFS URL)
 
     struct Fund {
@@ -17,6 +17,7 @@ contract FundNFT is ERC1155, IERC1155Receiver {
         uint256 totalSupply; // Total number of NFTs allocated for the fund
         uint256 availableSupply; // Number of NFTs still available for purchase
         string baseURI; // Base URI for this specific fund
+        uint256 price; // Price of the NFT for each fund
     }
 
     mapping(uint256 => Fund) private funds; // Mapping of fund ID to Fund details
@@ -74,9 +75,11 @@ contract FundNFT is ERC1155, IERC1155Receiver {
     // Function to create a new fund with a specified number of NFTs
     function createFund(
         uint256 nftSupply,
-        string memory fundBaseURI
+        string memory fundBaseURI,
+        uint256 nft_Price
     ) external onlyOwner returns (uint256) {
         require(nftSupply > 0, "NFT supply must be greater than zero");
+        require(nft_Price > 0, "NFT price must be greater than 0");
 
         uint256 newTokenId = currentTokenId += 1; // Increment token ID for the new fund
         currentTokenId = newTokenId;
@@ -87,7 +90,8 @@ contract FundNFT is ERC1155, IERC1155Receiver {
             tokenId: currentTokenId,
             totalSupply: nftSupply,
             availableSupply: nftSupply,
-            baseURI: fundBaseURI
+            baseURI: fundBaseURI,
+            price: nft_Price
         });
 
         // Mint all NFTs for the owner (admin) initially, as these represent the fund
@@ -98,20 +102,53 @@ contract FundNFT is ERC1155, IERC1155Receiver {
     }
 
     // Function to allow investors to swap 0.05 ETH for an NFT of a specific fund
-    function buyNFT(uint256 fundId) external payable {
+    function buyNFT(uint256 fundId, uint256 quantity) external payable {
         require(fundId > 0 && fundId <= currentFundId, "Invalid fund ID");
+        require(quantity > 0, "Quantity must be greater than Zero");
+
+        // Fetch the fund details
         Fund storage fund = funds[fundId];
-        require(fund.availableSupply > 0, "No NFTs available for this fund");
+
+        // Ensure the Fund has available NFTs
         require(
-            msg.value >= NFT_PRICE,
-            "should send 0.05 ETH to purchase an NFT"
+            fund.availableSupply >= quantity,
+            "Not enough NFTs available for this fund"
+        );
+
+        // Calculate the total price for the Requested Quantity
+        uint256 totalPrice = fund.price * quantity;
+
+        // Ensure the Buyer has sent the correct amount of Ether
+        require(
+            msg.value >= totalPrice,
+            "Insufficient Ether sent to purchase NFT"
         );
 
         // Transfer one NFT from the owner's balance to the buyer
-        fund.availableSupply -= 1; // Decrease the available supply for the fund
-        _safeTransferFrom(address(this), msg.sender, fund.tokenId, 1, ""); // Transfer 1 NFT to buyer
+        fund.availableSupply -= quantity; // Decrease the available supply for the fund
+        console.log(
+            "Contract balance before transfer:",
+            balanceOf(address(this), fund.tokenId)
+        );
+        console.log("Transferring quantity:", quantity);
+        _safeTransferFrom(
+            address(this),
+            msg.sender,
+            fund.tokenId,
+            quantity,
+            ""
+        ); // Transfer NFTs to buyer
+        console.log(
+            "Contract balance after transfer:",
+            balanceOf(address(this), fund.tokenId)
+        );
 
-        emit NFTPurchased(msg.sender, fundId, fund.tokenId, 1);
+        // Refund any excess Ether
+        if (msg.value > totalPrice) {
+            payable(msg.sender).transfer(msg.value - totalPrice);
+        }
+
+        emit NFTPurchased(msg.sender, fundId, fund.tokenId, quantity);
     }
 
     // Function to withdraw ETH collected from NFT sales
@@ -140,23 +177,27 @@ contract FundNFT is ERC1155, IERC1155Receiver {
         uint256 tokenId
     ) public view returns (string memory) {
         require(fundId > 0 && fundId <= currentFundId, "Invalid fund ID");
+
         Fund storage fund = funds[fundId];
+
         require(
             tokenId == fund.tokenId,
             "Token ID does not match the fund's token ID"
         );
-        // Ensure baseURI is set correctly
 
-        require(bytes(baseURI).length > 0, "Base URI is empty");
+        // Ensure baseURI is set correctly
+        require(bytes(fund.baseURI).length > 0, "Base URI is empty");
 
         // require(tokenId > 0 && tokenId <= currentTokenId, "Invalid token ID");
-        string memory slash = bytes(baseURI)[bytes(baseURI).length - 1] == "/"
+        string memory slash = bytes(fund.baseURI)[
+            bytes(fund.baseURI).length - 1
+        ] == "/"
             ? ""
             : "/";
         return
             string(
                 abi.encodePacked(
-                    baseURI,
+                    fund.baseURI,
                     slash,
                     Strings.toString(tokenId),
                     ".json"
@@ -167,11 +208,6 @@ contract FundNFT is ERC1155, IERC1155Receiver {
     // Getter function for currentTokenId
     function getCurrentTokenId() external view returns (uint256) {
         return currentTokenId;
-    }
-
-    // Getter function for NFT price
-    function getNFTPrice() external pure returns (uint256) {
-        return NFT_PRICE;
     }
 
     // Getter function for currentFundId
@@ -189,7 +225,8 @@ contract FundNFT is ERC1155, IERC1155Receiver {
             uint256 tokenId,
             uint256 totalSupply,
             uint256 availableSupply,
-            string memory fundBaseURI
+            string memory fundBaseURI,
+            uint256 price
         )
     {
         require(fundId > 0 && fundId <= currentFundId, "Invalid fund ID");
@@ -198,7 +235,8 @@ contract FundNFT is ERC1155, IERC1155Receiver {
             fund.tokenId,
             fund.totalSupply,
             fund.availableSupply,
-            fund.baseURI
+            fund.baseURI,
+            fund.price
         );
     }
 
