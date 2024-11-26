@@ -18,22 +18,31 @@ contract FundNFT is ERC1155, IERC1155Receiver, ReentrancyGuard {
         uint256 availableSupply; // Number of NFTs still available for purchase
         string baseURI; // Base URI for this specific fund
         uint256 price; // Price of the NFT for each fund
+        string name; // Name of the Fund Created
+        string symbol; // Symbol of the Fund Created
     }
 
     mapping(uint256 => Fund) private funds; // Mapping of fund ID to Fund details
+    mapping(uint256 => mapping(address => uint256[])) private tokenIds; // Mapping to track investors' token IDs by fund
+    mapping(uint256 => uint256) private fundTokenIdCounter; // Tracks next token ID for each fund
+    mapping(uint256 => mapping(address => mapping(uint256 => uint256)))
+        private tokenBalances;
     uint256 private currentFundId; // Fund ID counter
 
     event FundCreated(
         uint256 indexed fundId,
         uint256 indexed tokenId,
         uint256 totalSupply,
-        string baseURI
+        string baseURI,
+        string name,
+        string symbol
     );
     event NFTPurchased(
-        address indexed buyer,
-        uint256 indexed fundId,
-        uint256 indexed tokenId,
-        uint256 amount
+        address indexed buyer, // address of the buyer
+        uint256 indexed fundId, // The FundId associated with the purchase
+        uint256 indexed tokenId, // Unique tokenId of the NFT purchased
+        uint256 amount, // Number of NFTs purchased
+        uint256 timestamp // timeStamp of the NFT purchase
     );
 
     // Custom onlyOwner modifier
@@ -76,13 +85,16 @@ contract FundNFT is ERC1155, IERC1155Receiver, ReentrancyGuard {
     function createFund(
         uint256 nftSupply,
         string memory fundBaseURI,
-        uint256 nft_Price
+        uint256 nft_Price,
+        string memory fundName,
+        string memory fundSymbol
     ) external onlyOwner returns (uint256) {
         require(nftSupply > 0, "NFT supply must be greater than zero");
         require(nft_Price > 0, "NFT price must be greater than 0");
+        require(bytes(fundName).length > 0, "Fund Name must not be empty");
+        require(bytes(fundSymbol).length > 0, "Fund symbol must not be empty");
 
-        uint256 newTokenId = currentTokenId += 1; // Increment token ID for the new fund
-        currentTokenId = newTokenId;
+        uint256 newTokenId = currentTokenId++; // Increment token ID for the new fund
         currentFundId += 1; // Increment fund ID
 
         // Create a new fund
@@ -91,18 +103,27 @@ contract FundNFT is ERC1155, IERC1155Receiver, ReentrancyGuard {
             totalSupply: nftSupply,
             availableSupply: nftSupply,
             baseURI: fundBaseURI,
-            price: nft_Price
+            price: nft_Price,
+            name: fundName,
+            symbol: fundSymbol
         });
 
-        // Mint all NFTs for the owner (admin) initially, as these represent the fund
-        _mint(address(this), currentTokenId, nftSupply, "");
-
-        emit FundCreated(currentFundId, currentTokenId, nftSupply, fundBaseURI);
+        emit FundCreated(
+            currentFundId,
+            currentTokenId,
+            nftSupply,
+            fundBaseURI,
+            fundName,
+            fundSymbol
+        );
         return currentFundId; // Return the new fund's ID
     }
 
     // Function to allow investors to swap 0.05 ETH for an NFT of a specific fund
-    function buyNFT(uint256 fundId, uint256 quantity) external payable {
+    function buyNFT(
+        uint256 fundId,
+        uint256 quantity
+    ) external payable nonReentrant {
         require(fundId > 0 && fundId <= currentFundId, "Invalid fund ID");
         require(quantity > 0, "Quantity must be greater than Zero");
 
@@ -124,31 +145,44 @@ contract FundNFT is ERC1155, IERC1155Receiver, ReentrancyGuard {
             "Insufficient Ether sent to purchase NFT"
         );
 
-        // Transfer one NFT from the owner's balance to the buyer
         fund.availableSupply -= quantity; // Decrease the available supply for the fund
-        console.log(
-            "Contract balance before transfer:",
-            balanceOf(address(this), fund.tokenId)
-        );
-        console.log("Transferring quantity:", quantity);
-        _safeTransferFrom(
-            address(this),
-            msg.sender,
-            fund.tokenId,
-            quantity,
-            ""
-        ); // Transfer NFTs to buyer
-        console.log(
-            "Contract balance after transfer:",
-            balanceOf(address(this), fund.tokenId)
-        );
+
+        if (quantity == 1) {
+            // Handle single Mint
+            uint256 newTokenId = ++fundTokenIdCounter[fundId]; // Generate a new unique token Id for this nft
+            _mint(msg.sender, newTokenId, 1, ""); // Mint a single NFT
+            tokenIds[fundId][msg.sender].push(newTokenId); // Track the token Id for the buyer
+
+            // Update the user's balance for this specific token ID
+            tokenBalances[fundId][msg.sender][newTokenId] = 1; // Each NFT should have a balance of 1
+        } else {
+            //Handle Batch Mint
+            uint256[] memory tokenIdsBatch = new uint256[](quantity);
+            uint256[] memory quantitiesBatch = new uint256[](quantity);
+
+            for (uint256 i = 0; i < quantity; i++) {
+                uint256 newTokenId = ++fundTokenIdCounter[fundId]; // Generate a new unique Token ID for this nft
+                tokenIdsBatch[i] = newTokenId; // Add to Batch
+                quantitiesBatch[i] = 1; // Each NFT quantity is 1
+                tokenIds[fundId][msg.sender].push(newTokenId); // Track the token ID for the buyers
+
+                tokenBalances[fundId][msg.sender][newTokenId] = 1; // Each NFT should have a balance of 1
+            }
+            _mintBatch(msg.sender, tokenIdsBatch, quantitiesBatch, ""); // Mints all NFTs in one transaction
+        }
 
         // Refund any excess Ether
         if (msg.value > totalPrice) {
             payable(msg.sender).transfer(msg.value - totalPrice);
         }
 
-        emit NFTPurchased(msg.sender, fundId, fund.tokenId, quantity);
+        emit NFTPurchased(
+            msg.sender,
+            fundId,
+            fundTokenIdCounter[fundId],
+            quantity,
+            block.timestamp
+        );
     }
 
     // Function to withdraw ETH collected from NFT sales
@@ -226,7 +260,9 @@ contract FundNFT is ERC1155, IERC1155Receiver, ReentrancyGuard {
             uint256 totalSupply,
             uint256 availableSupply,
             string memory fundBaseURI,
-            uint256 price
+            uint256 price,
+            string memory name,
+            string memory symbol
         )
     {
         require(fundId > 0 && fundId <= currentFundId, "Invalid fund ID");
@@ -236,7 +272,9 @@ contract FundNFT is ERC1155, IERC1155Receiver, ReentrancyGuard {
             fund.totalSupply,
             fund.availableSupply,
             fund.baseURI,
-            fund.price
+            fund.price,
+            fund.name,
+            fund.symbol
         );
     }
 
@@ -245,5 +283,27 @@ contract FundNFT is ERC1155, IERC1155Receiver, ReentrancyGuard {
         uint256 tokenId
     ) external view returns (string memory) {
         return constructMetadataURL(fundId, tokenId);
+    }
+
+    function getNftTokenIds(
+        uint256 fundId,
+        address buyer
+    ) external view returns (uint256[] memory) {
+        require(fundId > 0 && fundId <= currentFundId, "Invalid FundId");
+        return (tokenIds[fundId][buyer]);
+    }
+
+    function getFundTokenIdCounter(
+        uint256 fundId
+    ) external view returns (uint256) {
+        return fundTokenIdCounter[fundId];
+    }
+
+    function getTokenBalance(
+        uint256 fundId,
+        address user,
+        uint256 tokenId
+    ) external view returns (uint256) {
+        return tokenBalances[fundId][user][tokenId];
     }
 }
